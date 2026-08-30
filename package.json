@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-cd",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "main": "./session-directory.tsx",
   "description": "OpenCode TUI plugin for changing the current session directory",
   "exports": {
     ".": {

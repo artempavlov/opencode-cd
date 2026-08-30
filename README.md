@@ -15,13 +15,14 @@ without creating a new session.
 
 ## Setup
 
-Install dependencies:
+Install the plugin from GitHub:
 
 ```sh
-bun install
+opencode plugin github:artempavlov/opencode-cd --global
 ```
 
-Add the plugin file to the global OpenCode TUI configuration in
+For local development, install dependencies with `bun install` and add the
+plugin file to the global OpenCode TUI configuration in
 `~/.config/opencode/tui.json`:
 
 ```json
@@ -34,6 +35,3 @@ Add the plugin file to the global OpenCode TUI configuration in
 ```
 
 Restart OpenCode after changing the configuration.
-
-The destination must belong to the same OpenCode project. OpenCode rejects a
-move to an unrelated project.

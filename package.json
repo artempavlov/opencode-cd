@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-cd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode TUI plugin for changing the current session directory",
+  "scripts": {
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.25",
+    "@opentui/core": "0.5.1",
+    "@opentui/keymap": "0.5.1",
+    "@opentui/solid": "0.5.1",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "typescript": "5.9.3"
+  }
+}

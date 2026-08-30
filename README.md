@@ -15,14 +15,15 @@ without creating a new session.
 
 ## Setup
 
-Install the plugin from GitHub:
+Install the plugin from the GitHub checkout:
 
 ```sh
-opencode plugin opencode-cd@github:artempavlov/opencode-cd#main --global
+git clone https://github.com/artempavlov/opencode-cd.git /path/to/opencode-cd
 ```
 
-For local development, install dependencies with `bun install` and add the
-plugin file to the global OpenCode TUI configuration in
+For updates, run `git pull --ff-only` in the checkout. Install dependencies
+with `bun install`, then add the plugin file to the global OpenCode TUI
+configuration in
 `~/.config/opencode/tui.json`:
 
 ```json

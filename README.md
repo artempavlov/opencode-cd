@@ -18,7 +18,7 @@ without creating a new session.
 Install the plugin from GitHub:
 
 ```sh
-opencode plugin github:artempavlov/opencode-cd --global
+opencode plugin opencode-cd@github:artempavlov/opencode-cd --global
 ```
 
 For local development, install dependencies with `bun install` and add the

@@ -3,7 +3,6 @@
   "name": "opencode-cd",
   "version": "0.1.0",
   "type": "module",
-  "main": "./session-directory.tsx",
   "description": "OpenCode TUI plugin for changing the current session directory",
   "exports": {
     ".": {

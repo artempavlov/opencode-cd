@@ -29,7 +29,7 @@ plugin file to the global OpenCode TUI configuration in
 {
   "$schema": "https://opencode.ai/tui.json",
   "plugin": [
-    "file:///path/to/opencode-cd/session-directory.tsx"
+    "file:///path/to/opencode-cd/session-directory.ts"
   ]
 }
 ```

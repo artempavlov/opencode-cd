@@ -6,12 +6,12 @@
   "description": "OpenCode TUI plugin for changing the current session directory",
   "exports": {
     ".": {
-      "types": "./session-directory.tsx",
-      "import": "./session-directory.tsx"
+      "types": "./session-directory.ts",
+      "import": "./session-directory.ts"
     },
     "./tui": {
-      "types": "./session-directory.tsx",
-      "import": "./session-directory.tsx"
+      "types": "./session-directory.ts",
+      "import": "./session-directory.ts"
     }
   },
   "scripts": {

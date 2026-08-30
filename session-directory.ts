@@ -1,5 +1,3 @@
-/** @jsxImportSource @opentui/solid */
-
 import { stat } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -114,11 +112,11 @@ function openPathPrompt(api: TuiPluginApi) {
   }
 
   api.ui.dialog.setSize("medium")
-  api.ui.dialog.replace(() => (
-    <api.ui.DialogPrompt
-      title="Change session directory"
-      placeholder="Absolute path or path relative to the current directory"
-      onConfirm={(raw) => {
+  api.ui.dialog.replace(() =>
+    api.ui.DialogPrompt({
+      title: "Change session directory",
+      placeholder: "Absolute path or path relative to the current directory",
+      onConfirm: (raw) => {
         if (!raw.trim()) {
           api.ui.toast({ variant: "error", message: "Directory path is required." })
           return
@@ -126,10 +124,10 @@ function openPathPrompt(api: TuiPluginApi) {
 
         const directory = resolveDirectory(raw, current)
         void prepareMove(api, sessionID, current, directory)
-      }}
-      onCancel={() => api.ui.dialog.clear()}
-    />
-  ))
+      },
+      onCancel: () => api.ui.dialog.clear(),
+    }),
+  )
 }
 
 async function prepareMove(api: TuiPluginApi, sessionID: string, current: string, directory: string) {
@@ -145,17 +143,17 @@ async function prepareMove(api: TuiPluginApi, sessionID: string, current: string
 
   const files = await changedFiles(api, current)
   if (files.length > 0) {
-    api.ui.dialog.replace(() => (
-      <api.ui.DialogConfirm
-        title="Uncommitted changes"
-        message={`Move ${files.length} changed file${files.length === 1 ? "" : "s"} to the new directory? Press Esc to leave them in the current directory.`}
-        onConfirm={() => {
+    api.ui.dialog.replace(() =>
+      api.ui.DialogConfirm({
+        title: "Uncommitted changes",
+        message: `Move ${files.length} changed file${files.length === 1 ? "" : "s"} to the new directory? Press Esc to leave them in the current directory.`,
+        onConfirm: () => {
           api.ui.dialog.clear()
           void performMove(api, sessionID, directory, true)
-        }}
-        onCancel={() => api.ui.dialog.clear()}
-      />
-    ))
+        },
+        onCancel: () => api.ui.dialog.clear(),
+      }),
+    )
     return
   }
 

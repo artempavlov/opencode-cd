@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { isSessionIdle, shouldUseNativeMove } from "./session-directory"
+import { isLoopbackAddress } from "./session-migration"
 
 describe("session move strategy", () => {
   it("uses the native move inside one project, including the global non-Git project", () => {
@@ -16,5 +17,11 @@ describe("session move strategy", () => {
     expect(isSessionIdle(undefined)).toBe(true)
     expect(isSessionIdle({ type: "busy" })).toBe(false)
     expect(isSessionIdle({ type: "retry" })).toBe(false)
+  })
+
+  it("recognizes loopback aliases used by the local host", () => {
+    expect(isLoopbackAddress("127.0.0.2")).toBe(true)
+    expect(isLoopbackAddress("::1")).toBe(true)
+    expect(isLoopbackAddress("100.64.0.1")).toBe(false)
   })
 })

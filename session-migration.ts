@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto"
+import { promises as dns } from "node:dns"
 import { access, chmod, constants, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { isIP } from "node:net"
 import os from "node:os"
 import path from "node:path"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
@@ -222,7 +224,7 @@ export async function migrateSession(input: {
   let stage = "checking the local OpenCode server"
   let destinationSessionID: string | undefined
   try {
-    ensureLocalServer(client)
+    await ensureLocalServer(client)
     const source = await getSession(client, sessionID, sourceDirectory)
     stage = "checking child sessions"
     await ensureNoChildren(client, sessionID, sourceDirectory)
@@ -580,7 +582,7 @@ function errorMessage(error: unknown) {
   return String(error)
 }
 
-function ensureLocalServer(client: Client & Record<string, any>) {
+async function ensureLocalServer(client: Client & Record<string, any>) {
   const sdkClient = (client as any).client
   const getConfig = sdkClient?.getConfig
   if (typeof getConfig !== "function") return
@@ -593,9 +595,21 @@ function ensureLocalServer(client: Client & Record<string, any>) {
     throw new Error("Cross-project migration requires a local OpenCode server")
   }
   hostname = hostname.replace(/^\[|\]$/g, "")
-  if (!new Set(["localhost", "127.0.0.1", "::1"]).has(hostname)) {
+  if (isLoopbackAddress(hostname)) return
+  try {
+    const addresses = await dns.lookup(hostname, { all: true })
+    if (addresses.length > 0 && addresses.every((entry) => isLoopbackAddress(entry.address))) return
+  } catch {
+    // An unresolvable hostname is not trusted as a local server.
+  }
+  if (hostname !== "localhost") {
     throw new Error("Cross-project migration is unavailable when the TUI is attached to a remote OpenCode server")
   }
+}
+
+export function isLoopbackAddress(address: string) {
+  if (isIP(address) === 4) return address.startsWith("127.")
+  return isIP(address) === 6 && address.toLowerCase() === "::1"
 }
 
 function createID(prefix: string, originalID: string, namespace: string) {

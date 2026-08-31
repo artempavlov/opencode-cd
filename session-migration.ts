@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { promises as dns } from "node:dns"
 import { access, chmod, constants, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { isIP } from "node:net"
 import os from "node:os"
 import path from "node:path"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
@@ -221,10 +219,9 @@ export async function migrateSession(input: {
 }): Promise<MigrationResult> {
   const { api, sessionID, sourceDirectory, destinationDirectory, progress } = input
   const client = api.client as any as Client & Record<string, any>
-  let stage = "checking the local OpenCode server"
+  let stage = "reading the source session"
   let destinationSessionID: string | undefined
   try {
-    await ensureLocalServer(client)
     const source = await getSession(client, sessionID, sourceDirectory)
     stage = "checking child sessions"
     await ensureNoChildren(client, sessionID, sourceDirectory)
@@ -580,55 +577,6 @@ function errorMessage(error: unknown) {
     if (typeof value.message === "string") return value.message
   }
   return String(error)
-}
-
-async function ensureLocalServer(client: Client & Record<string, any>) {
-  const sdkClient = (client as any).client
-  const getConfig = sdkClient?.getConfig
-  if (typeof getConfig !== "function") return
-  const baseUrl = getConfig.call(sdkClient)?.baseUrl
-  if (!baseUrl) return
-  let hostname: string
-  try {
-    hostname = new URL(baseUrl).hostname
-  } catch {
-    throw new Error("Cross-project migration requires a local OpenCode server")
-  }
-  hostname = hostname.replace(/^\[|\]$/g, "")
-  if (!(await isLocalServerHostname(hostname))) {
-    throw new Error("Cross-project migration is unavailable when the TUI is attached to a remote OpenCode server")
-  }
-}
-
-export async function isLocalServerHostname(hostname: string) {
-  const normalized = hostname.replace(/^\[|\]$/g, "")
-  if (isLocalServerAddress(normalized)) return true
-  try {
-    const addresses = await dns.lookup(normalized, { all: true })
-    const localAddresses = new Set(
-      Object.values(os.networkInterfaces())
-        .flatMap((items) => items ?? [])
-        .map((item) => item.address),
-    )
-    return addresses.length > 0 && addresses.every((entry) => isLocalServerAddress(entry.address, localAddresses))
-  } catch {
-    return normalized === "localhost"
-  }
-}
-
-function isLocalServerAddress(address: string, localAddresses?: ReadonlySet<string>) {
-  if (isLoopbackAddress(address)) return true
-  const addresses = localAddresses ?? new Set(
-    Object.values(os.networkInterfaces())
-      .flatMap((items) => items ?? [])
-      .map((item) => item.address),
-  )
-  return addresses.has(address)
-}
-
-export function isLoopbackAddress(address: string) {
-  if (isIP(address) === 4) return address.startsWith("127.")
-  return isIP(address) === 6 && address.toLowerCase() === "::1"
 }
 
 function createID(prefix: string, originalID: string, namespace: string) {

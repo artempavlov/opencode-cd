@@ -26,6 +26,7 @@ function migrationApi(options: {
   failSourceDelete?: boolean
   config?: { model?: string; default_agent?: string }
   models?: unknown[]
+  listedModels?: unknown[]
   agents?: unknown[]
   children?: unknown[]
   childrenBySession?: Record<string, unknown[]>
@@ -58,6 +59,18 @@ function migrationApi(options: {
     config: {
       async get() {
         return { data: options.config ?? {} }
+      },
+      async providers() {
+        const providers = new Map<string, { id: string; models: Record<string, unknown> }>()
+        for (const item of (options.models ?? [
+          { id: "model-a", providerID: "provider-a", variants: { fast: {} } },
+        ]) as Array<Record<string, unknown>>) {
+          const providerID = item.providerID as string
+          const provider = providers.get(providerID) ?? { id: providerID, models: {} }
+          provider.models[item.id as string] = item
+          providers.set(providerID, provider)
+        }
+        return { data: { providers: [...providers.values()], default: {} } }
       },
     },
     session: {
@@ -121,7 +134,7 @@ function migrationApi(options: {
         async list() {
           return {
             data: {
-              data: options.models ?? [
+              data: options.listedModels ?? options.models ?? [
                 {
                   id: "model-a",
                   providerID: "provider-a",
@@ -438,9 +451,9 @@ describe("session migration", () => {
     const state = migrationApi({
       config: { model: "provider-default/model-default" },
       models: [
-        { id: "model-newest", providerID: "provider-random", enabled: true, variants: [] },
         { id: "model-default", providerID: "provider-default", enabled: true, variants: [] },
       ],
+      listedModels: [{ id: "model-newest", providerID: "provider-random", enabled: true, variants: [] }],
       destinationProjectID: "project-b",
     })
     let selectedModel: unknown
@@ -463,5 +476,32 @@ describe("session migration", () => {
     expect(result.warnings).toContain(
       "Model provider-a/model-a is unavailable; selected provider-default/model-default.",
     )
+  })
+
+  it("preserves a source model omitted from the v2 model catalog", async () => {
+    const state = migrationApi({
+      config: { model: "provider-a/model-a" },
+      models: [{ id: "model-a", providerID: "provider-a", variants: { fast: {} } }],
+      listedModels: [{ id: "model-newest", providerID: "provider-random", enabled: true, variants: [] }],
+      destinationProjectID: "project-b",
+    })
+    let selectedModel: unknown
+
+    const result = await migrateSession({
+      api: state.api,
+      newSessionID: state.nextDestinationID,
+      sessionID: "ses-source",
+      sourceDirectory: "/projects/a",
+      destinationDirectory: "/projects/b",
+      destinationProjectID: "project-b",
+      importSession: async (input) => {
+        const payload = await Bun.file(input.filePath).json()
+        selectedModel = payload.info.model
+        state.markImported(payload.messages, payload.info)
+      },
+    })
+
+    expect(selectedModel).toEqual({ id: "model-a", providerID: "provider-a", variant: "fast" })
+    expect(result.warnings).toEqual([])
   })
 })

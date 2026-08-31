@@ -527,14 +527,12 @@ async function destinationSettings(client: Client & Record<string, any>, source:
   const sourceModel = source.model
   let model = sourceModel
   if (sourceModel) {
-    const modelsResult = await client.v2.model.list({ location: { directory } }, { throwOnError: true })
-    const models = modelsResult?.data?.data
-    if (!Array.isArray(models)) throw new Error("Could not list models for the destination project")
-    const exact = models.find(
-      (item: any) => item.enabled !== false && item.id === sourceModel.id && item.providerID === sourceModel.providerID,
-    )
+    const providersResult = await client.config.providers({ directory }, { throwOnError: true })
+    const providers = providersResult?.data?.providers
+    if (!Array.isArray(providers)) throw new Error("Could not list providers for the destination project")
+    const exact = findProviderModel(providers, sourceModel)
     if (exact) {
-      const variant = sourceModel.variant && exact.variants?.some((item: any) => item.id === sourceModel.variant)
+      const variant = sourceModel.variant && hasModelVariant(exact.info, sourceModel.variant)
         ? sourceModel.variant
         : undefined
       model = { id: exact.id, providerID: exact.providerID, variant }
@@ -545,12 +543,7 @@ async function destinationSettings(client: Client & Record<string, any>, source:
       const configResult = await client.config.get({ directory }, { throwOnError: true })
       const configured = parseModel(configResult?.data?.model)
       const fallback =
-        (configured
-          ? models.find(
-              (item: any) =>
-                item.enabled !== false && item.id === configured.id && item.providerID === configured.providerID,
-            )
-          : undefined) ?? models.find((item: any) => item.enabled !== false)
+        (configured ? findProviderModel(providers, configured) : undefined) ?? firstProviderModel(providers)
       if (!fallback) throw new Error("No enabled model is available in the destination project")
       model = { id: fallback.id, providerID: fallback.providerID }
       warnings.push(`Model ${sourceModel.providerID}/${sourceModel.id} is unavailable; selected ${fallback.providerID}/${fallback.id}.`)
@@ -583,6 +576,31 @@ function parseModel(value: unknown) {
   const separator = value.indexOf("/")
   if (separator <= 0 || separator === value.length - 1) return undefined
   return { providerID: value.slice(0, separator), id: value.slice(separator + 1) }
+}
+
+function findProviderModel(
+  providers: Array<Record<string, any>>,
+  model: { providerID: string; id: string },
+) {
+  const provider = providers.find((item) => item.id === model.providerID)
+  const info = provider?.models?.[model.id]
+  if (!info) return undefined
+  return { providerID: model.providerID, id: model.id, info }
+}
+
+function firstProviderModel(providers: Array<Record<string, any>>) {
+  for (const provider of providers) {
+    const entry = Object.entries(provider.models ?? {})[0]
+    if (!entry) continue
+    const [id, info] = entry
+    return { providerID: provider.id as string, id, info }
+  }
+  return undefined
+}
+
+function hasModelVariant(model: Record<string, any>, variant: string) {
+  if (Array.isArray(model.variants)) return model.variants.some((item: any) => item.id === variant)
+  return Boolean(model.variants && Object.hasOwn(model.variants, variant))
 }
 
 async function createSessionID(

@@ -92,7 +92,9 @@ credential setting.
   `parentID` values must point to the newly mapped destination parent.
 - Destination model/agent fallbacks are reported as warnings. API failures are
   surfaced through TUI error toasts; model fallback prefers the merged
-  destination config's default model before any other available model.
+  destination config's default model before any other available model. Model
+  compatibility uses the complete `config.providers` registry, not the
+  UI-oriented `v2.model.list` catalog, which can omit plugin-provided models.
   Successful moves and non-fatal warnings use success/info/warning toasts.
 - New child-session IDs preserve the source sibling-ID ordering because the TUI
   sorts sibling sessions lexicographically when cycling with arrow keys.

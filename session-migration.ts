@@ -595,16 +595,35 @@ async function ensureLocalServer(client: Client & Record<string, any>) {
     throw new Error("Cross-project migration requires a local OpenCode server")
   }
   hostname = hostname.replace(/^\[|\]$/g, "")
-  if (isLoopbackAddress(hostname)) return
-  try {
-    const addresses = await dns.lookup(hostname, { all: true })
-    if (addresses.length > 0 && addresses.every((entry) => isLoopbackAddress(entry.address))) return
-  } catch {
-    // An unresolvable hostname is not trusted as a local server.
-  }
-  if (hostname !== "localhost") {
+  if (!(await isLocalServerHostname(hostname))) {
     throw new Error("Cross-project migration is unavailable when the TUI is attached to a remote OpenCode server")
   }
+}
+
+export async function isLocalServerHostname(hostname: string) {
+  const normalized = hostname.replace(/^\[|\]$/g, "")
+  if (isLocalServerAddress(normalized)) return true
+  try {
+    const addresses = await dns.lookup(normalized, { all: true })
+    const localAddresses = new Set(
+      Object.values(os.networkInterfaces())
+        .flatMap((items) => items ?? [])
+        .map((item) => item.address),
+    )
+    return addresses.length > 0 && addresses.every((entry) => isLocalServerAddress(entry.address, localAddresses))
+  } catch {
+    return normalized === "localhost"
+  }
+}
+
+function isLocalServerAddress(address: string, localAddresses?: ReadonlySet<string>) {
+  if (isLoopbackAddress(address)) return true
+  const addresses = localAddresses ?? new Set(
+    Object.values(os.networkInterfaces())
+      .flatMap((items) => items ?? [])
+      .map((item) => item.address),
+  )
+  return addresses.has(address)
 }
 
 export function isLoopbackAddress(address: string) {

@@ -24,6 +24,7 @@ const sourceMessages = [
 
 function migrationApi(options: {
   failSourceDelete?: boolean
+  config?: { model?: string; default_agent?: string }
   models?: unknown[]
   agents?: unknown[]
   children?: unknown[]
@@ -54,6 +55,11 @@ function migrationApi(options: {
   }
 
   const client = {
+    config: {
+      async get() {
+        return { data: options.config ?? {} }
+      },
+    },
     session: {
       async children(input: { sessionID: string }) {
         return { data: options.childrenBySession?.[input.sessionID] ?? options.children ?? [] }
@@ -342,6 +348,52 @@ describe("session migration", () => {
     expect(state.deleted).toEqual(["ses-destination", "ses-child-destination", "ses-source"])
   })
 
+  it("preserves sibling order used by TUI child-session navigation", async () => {
+    const childA = {
+      ...sourceInfo,
+      id: "ses-child-a",
+      title: "Child A",
+      parentID: "ses-source",
+      metadata: { ticket: "child-a" },
+    }
+    const childZ = {
+      ...sourceInfo,
+      id: "ses-child-z",
+      title: "Child Z",
+      parentID: "ses-source",
+      metadata: { ticket: "child-z" },
+    }
+    const state = migrationApi({
+      sourceSessions: { "ses-child-a": childA, "ses-child-z": childZ },
+      sourceMessagesBySession: { "ses-child-a": [], "ses-child-z": [] },
+      childrenBySession: {
+        "ses-source": [{ id: "ses-child-z" }, { id: "ses-child-a" }],
+        "ses-child-a": [],
+        "ses-child-z": [],
+      },
+      destinationIDs: ["ses-destination", "ses-child-A-destination", "ses-child-a-destination"],
+      destinationProjectID: "project-b",
+    })
+    const importedChildren = new Map<string, string>()
+
+    await migrateSession({
+      api: state.api,
+      newSessionID: state.nextDestinationID,
+      sessionID: "ses-source",
+      sourceDirectory: "/projects/a",
+      destinationDirectory: "/projects/b",
+      destinationProjectID: "project-b",
+      importSession: async (input) => {
+        const payload = await Bun.file(input.filePath).json()
+        const ticket = payload.info.metadata?.ticket
+        if (ticket === "child-a" || ticket === "child-z") importedChildren.set(ticket, payload.info.id)
+        state.markImported(payload.messages, payload.info, payload.info.id)
+      },
+    })
+
+    expect(importedChildren.get("child-a")! < importedChildren.get("child-z")!).toBe(true)
+  })
+
   it("rejects a busy source before creating a destination", async () => {
     const state = migrationApi({ status: { type: "busy" } })
     await expect(
@@ -380,5 +432,36 @@ describe("session migration", () => {
       "Model provider-a/model-a is unavailable; selected provider-b/model-b.",
       "Agent build is unavailable; selected plan.",
     ])
+  })
+
+  it("uses the destination configured default instead of the first listed model", async () => {
+    const state = migrationApi({
+      config: { model: "provider-default/model-default" },
+      models: [
+        { id: "model-newest", providerID: "provider-random", enabled: true, variants: [] },
+        { id: "model-default", providerID: "provider-default", enabled: true, variants: [] },
+      ],
+      destinationProjectID: "project-b",
+    })
+    let selectedModel: unknown
+
+    const result = await migrateSession({
+      api: state.api,
+      newSessionID: state.nextDestinationID,
+      sessionID: "ses-source",
+      sourceDirectory: "/projects/a",
+      destinationDirectory: "/projects/b",
+      destinationProjectID: "project-b",
+      importSession: async (input) => {
+        const payload = await Bun.file(input.filePath).json()
+        selectedModel = payload.info.model
+        state.markImported(payload.messages, payload.info)
+      },
+    })
+
+    expect(selectedModel).toEqual({ id: "model-default", providerID: "provider-default" })
+    expect(result.warnings).toContain(
+      "Model provider-a/model-a is unavailable; selected provider-default/model-default.",
+    )
   })
 })

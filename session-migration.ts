@@ -268,10 +268,13 @@ export async function migrateSession(input: {
 
     stage = "creating the destination sessions"
     progress?.(`Creating ${sourceNodes.length} destination session${sourceNodes.length === 1 ? "" : "s"}`)
-    const destinationIDs = new Map<string, string>()
+    const generatedDestinationIDs = new Map<SessionNode, string>()
     for (const node of sourceNodes) {
-      const destinationID = (input.newSessionID ?? createDestinationSessionID)()
-      destinationIDs.set(node.info.id, destinationID)
+      generatedDestinationIDs.set(node, (input.newSessionID ?? createDestinationSessionID)())
+    }
+    const destinationIDs = assignDestinationSessionIDs(sourceTree, generatedDestinationIDs)
+    for (const node of sourceNodes) {
+      const destinationID = destinationIDs.get(node.info.id)!
       const destinationNode: PreparedNode = {
         source: node,
         destinationID,
@@ -451,6 +454,28 @@ function flattenNodes(root: SessionNode) {
   return result
 }
 
+function assignDestinationSessionIDs(root: SessionNode, generated: Map<SessionNode, string>) {
+  const ids = [...generated.values()]
+  if (new Set(ids).size !== ids.length) throw new Error("Destination session ID generator returned duplicate IDs")
+
+  const result = new Map<string, string>()
+  result.set(root.info.id, generated.get(root)!)
+  const visit = (parent: SessionNode) => {
+    const children = [...parent.children].sort((left, right) => compareIDs(left.info.id, right.info.id))
+    const destinationIDs = parent.children.map((child) => generated.get(child)!).sort(compareIDs)
+    for (const [index, child] of children.entries()) {
+      result.set(child.info.id, destinationIDs[index]!)
+      visit(child)
+    }
+  }
+  visit(root)
+  return result
+}
+
+function compareIDs(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
 async function ensureSourceStillSafe(
   client: Client & Record<string, any>,
   sourceNodes: SessionNode[],
@@ -517,7 +542,15 @@ async function destinationSettings(client: Client & Record<string, any>, source:
         warnings.push(`Model variant ${sourceModel.variant} is unavailable; using the base ${exact.providerID}/${exact.id} model.`)
       }
     } else {
-      const fallback = models.find((item: any) => item.enabled !== false)
+      const configResult = await client.config.get({ directory }, { throwOnError: true })
+      const configured = parseModel(configResult?.data?.model)
+      const fallback =
+        (configured
+          ? models.find(
+              (item: any) =>
+                item.enabled !== false && item.id === configured.id && item.providerID === configured.providerID,
+            )
+          : undefined) ?? models.find((item: any) => item.enabled !== false)
       if (!fallback) throw new Error("No enabled model is available in the destination project")
       model = { id: fallback.id, providerID: fallback.providerID }
       warnings.push(`Model ${sourceModel.providerID}/${sourceModel.id} is unavailable; selected ${fallback.providerID}/${fallback.id}.`)
@@ -543,6 +576,13 @@ async function destinationSettings(client: Client & Record<string, any>, source:
   }
 
   return { model, agent, warnings }
+}
+
+function parseModel(value: unknown) {
+  if (typeof value !== "string") return undefined
+  const separator = value.indexOf("/")
+  if (separator <= 0 || separator === value.length - 1) return undefined
+  return { providerID: value.slice(0, separator), id: value.slice(separator + 1) }
 }
 
 async function createSessionID(

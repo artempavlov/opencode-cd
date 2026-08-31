@@ -91,8 +91,11 @@ credential setting.
   historical file references, and omit snapshot/patch parts. Child
   `parentID` values must point to the newly mapped destination parent.
 - Destination model/agent fallbacks are reported as warnings. API failures are
-  surfaced through TUI error toasts; successful moves and non-fatal warnings
-  use success/info/warning toasts.
+  surfaced through TUI error toasts; model fallback prefers the merged
+  destination config's default model before any other available model.
+  Successful moves and non-fatal warnings use success/info/warning toasts.
+- New child-session IDs preserve the source sibling-ID ordering because the TUI
+  sorts sibling sessions lexicographically when cycling with arrow keys.
 - Do not add JSX to the GitHub/npm-loaded TUI entrypoint. The migration
   specification records an OpenTUI runtime problem for JSX-loaded plugins
   under `node_modules`; the current entrypoint uses the non-JSX TUI API.

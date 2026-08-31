@@ -1,10 +1,13 @@
-import { stat } from "node:fs/promises"
+import { constants } from "node:fs"
+import { access, stat } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { migrateSession } from "./session-migration.js"
 
 const pluginID = "artem.session-directory"
 const commandName = "session.change_directory"
+const activeMoves = new Set<string>()
 
 function currentSessionID(api: TuiPluginApi) {
   const route = api.route.current
@@ -23,6 +26,14 @@ export function resolveDirectory(value: string, current: string) {
   return path.resolve(current, expandHome(value.trim()))
 }
 
+export function isSessionIdle(status: { type: string } | undefined) {
+  return !status || status.type === "idle"
+}
+
+export function shouldUseNativeMove(sourceProjectID: string, destinationProjectID: string) {
+  return sourceProjectID === destinationProjectID
+}
+
 function message(error: unknown) {
   if (error instanceof Error) return error.message
   if (typeof error === "string") return error
@@ -36,6 +47,7 @@ function message(error: unknown) {
 
 async function isDirectory(directory: string) {
   try {
+    await access(directory, constants.R_OK | constants.X_OK)
     return (await stat(directory)).isDirectory()
   } catch {
     return false
@@ -91,7 +103,35 @@ async function moveSession(api: TuiPluginApi, sessionID: string, directory: stri
       },
       { throwOnError: true },
     )
-    .catch(() => undefined)
+    .catch(() => {
+      api.ui.toast({ variant: "warning", message: "Session moved, but the directory reminder could not be saved." })
+    })
+}
+
+async function ensureIdle(api: TuiPluginApi, sessionID: string, directory: string) {
+  const known = api.state.session.status(sessionID)
+  if (known) {
+    if (!isSessionIdle(known)) throw new Error("The session must be idle before it can be moved")
+    return
+  }
+
+  const result = await (api.client as any).session.status({ directory }, { throwOnError: true })
+  const status = result?.data?.[sessionID]
+  if (!isSessionIdle(status)) throw new Error("The session must be idle before it can be moved")
+}
+
+async function sessionInfo(api: TuiPluginApi, sessionID: string, directory: string) {
+  const result = await (api.client as any).session.get({ sessionID, directory }, { throwOnError: true })
+  const info = result?.data
+  if (!info?.id) throw new Error(`Session ${sessionID} was not found`)
+  return info
+}
+
+async function projectInfo(api: TuiPluginApi, directory: string) {
+  const result = await (api.client as any).project.current({ directory }, { throwOnError: true })
+  const info = result?.data
+  if (!info?.id) throw new Error(`Could not resolve the project for ${directory}`)
+  return info
 }
 
 function openPathPrompt(api: TuiPluginApi) {
@@ -142,31 +182,58 @@ async function prepareMove(api: TuiPluginApi, sessionID: string, current: string
   }
 
   const files = await changedFiles(api, current)
-  if (files.length > 0) {
-    api.ui.dialog.replace(() =>
-      api.ui.DialogConfirm({
-        title: "Uncommitted changes",
-        message: `Move ${files.length} changed file${files.length === 1 ? "" : "s"} to the new directory? Press Esc to leave them in the current directory.`,
-        onConfirm: () => {
-          api.ui.dialog.clear()
-          void performMove(api, sessionID, directory, true)
-        },
-        onCancel: () => api.ui.dialog.clear(),
-      }),
-    )
+  const changes = files.length > 0
+    ? `${files.length} changed file${files.length === 1 ? "" : "s"} will remain in the current directory. `
+    : ""
+  api.ui.dialog.replace(() =>
+    api.ui.DialogConfirm({
+      title: "Confirm session move",
+      message: `${changes}The conversation will be verified before this move is finalized. Continue?`,
+      onConfirm: () => {
+        api.ui.dialog.clear()
+        void performMove(api, sessionID, current, directory)
+      },
+      onCancel: () => api.ui.dialog.clear(),
+    }),
+  )
+}
+
+async function performMove(api: TuiPluginApi, sessionID: string, sourceDirectory: string, destinationDirectory: string) {
+  if (activeMoves.has(sessionID)) {
+    api.ui.toast({ variant: "warning", message: "A directory move is already in progress for this session." })
     return
   }
 
-  api.ui.dialog.clear()
-  await performMove(api, sessionID, directory, false)
-}
-
-async function performMove(api: TuiPluginApi, sessionID: string, directory: string, moveChanges: boolean) {
+  activeMoves.add(sessionID)
   try {
-    await moveSession(api, sessionID, directory, moveChanges)
-    api.ui.toast({ variant: "success", message: `Session directory changed to ${directory}` })
+    await ensureIdle(api, sessionID, sourceDirectory)
+    const source = await sessionInfo(api, sessionID, sourceDirectory)
+    const destination = await projectInfo(api, destinationDirectory)
+
+    if (shouldUseNativeMove(source.projectID, destination.id)) {
+      await moveSession(api, sessionID, destinationDirectory, false)
+      api.ui.toast({ variant: "success", message: `Session directory changed to ${destinationDirectory}` })
+      return
+    }
+
+    api.ui.toast({ variant: "info", message: "Moving session to another project..." })
+    const result = await migrateSession({
+      api,
+      sessionID,
+      sourceDirectory,
+      destinationDirectory,
+      destinationProjectID: destination.id,
+      progress: (message: string) => api.ui.toast({ variant: "info", message }),
+    })
+    api.route.navigate("session", { sessionID: result.sessionID })
+    if (result.warnings.length > 0) {
+      api.ui.toast({ variant: "warning", message: result.warnings.join(" ") })
+    }
+    api.ui.toast({ variant: "success", message: `Session moved to ${destinationDirectory}` })
   } catch (error) {
     api.ui.toast({ variant: "error", message: `Could not change session directory: ${message(error)}` })
+  } finally {
+    activeMoves.delete(sessionID)
   }
 }
 

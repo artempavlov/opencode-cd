@@ -1,7 +1,7 @@
 # opencode-cd
 
-OpenCode TUI plugin that changes the working directory of the current session
-without creating a new session.
+OpenCode TUI plugin that changes the working directory of the current session.
+Moving between projects preserves the conversation in a replacement session.
 
 ## Features
 
@@ -10,8 +10,11 @@ without creating a new session.
 - Keyboard shortcut: `Ctrl+Shift+D`.
 - Absolute paths, home paths (`~`), and paths relative to the current session.
 - Existing directories are checked before the move.
-- Uncommitted Git changes require an explicit confirmation before transfer.
+- Uncommitted Git changes remain in the source directory.
 - The model receives a synthetic reminder about the new directory.
+- Cross-project moves use a verified export/import flow and then remove the
+  source session.
+- Sessions with child sessions are rejected to avoid recursively deleting them.
 
 ## Setup
 

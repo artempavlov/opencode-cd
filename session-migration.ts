@@ -62,6 +62,8 @@ export function prepareImportPayload(
   messages: SessionMessage[],
   destinationSessionID: string,
   settings: DestinationSettings,
+  destinationParentID?: string,
+  sessionIDs?: Map<string, string>,
 ): ImportPayload {
   const summary = source.summary
     ? {
@@ -71,10 +73,10 @@ export function prepareImportPayload(
       }
     : undefined
 
-  const info = {
+  const info = rewriteSessionReferences({
     ...source,
     id: destinationSessionID,
-    parentID: undefined,
+    parentID: destinationParentID,
     permission: undefined,
     workspaceID: undefined,
     share: undefined,
@@ -85,7 +87,7 @@ export function prepareImportPayload(
     summary,
     model: settings.model,
     agent: settings.agent,
-  } as Omit<SessionInfo, "projectID" | "directory"> & { projectID?: string; directory?: string }
+  }, sessionIDs) as Omit<SessionInfo, "projectID" | "directory"> & { projectID?: string; directory?: string }
 
   const idNamespace = randomUUID().replaceAll("-", "")
   const messageIDs = new Map(messages.map((message) => [message.info.id, createID("msg", message.info.id, idNamespace)]))
@@ -103,7 +105,7 @@ export function prepareImportPayload(
       },
       parts: message.parts
         .filter(isTransferablePart)
-        .map((part) => rewritePart(part, destinationSessionID, id, messageIDs, idNamespace)),
+        .map((part) => rewritePart(part, destinationSessionID, id, messageIDs, idNamespace, sessionIDs)),
     }
   })
 
@@ -181,9 +183,10 @@ function rewritePart(
   messageID: string,
   messageIDs: Map<string, string>,
   idNamespace: string,
+  sessionIDs?: Map<string, string>,
 ) {
   const rewritten: Record<string, any> = {
-    ...part,
+    ...rewriteSessionReferences(part, sessionIDs),
     id: createID("prt", part.id, idNamespace),
     sessionID: destinationSessionID,
     messageID,
@@ -200,12 +203,40 @@ function rewritePart(
     rewritten.state = {
       ...part.state,
       attachments: part.state.attachments.map((attachment: Record<string, any>) =>
-        rewritePart(attachment, destinationSessionID, messageID, messageIDs, idNamespace),
+        rewritePart(attachment, destinationSessionID, messageID, messageIDs, idNamespace, sessionIDs),
       ),
     }
   }
 
   return rewritten
+}
+
+function rewriteSessionReferences(value: Record<string, any>, sessionIDs?: Map<string, string>): Record<string, any> {
+  if (!sessionIDs) return { ...value }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      if (
+        (key === "sessionID" ||
+          key === "sessionId" ||
+          key === "parentSessionID" ||
+          key === "parentSessionId" ||
+          key === "jobID" ||
+          key === "jobId") &&
+        typeof item === "string"
+      ) {
+        return [key, sessionIDs.get(item) ?? item]
+      }
+      if (Array.isArray(item)) return [key, item.map((entry) => rewriteReferenceValue(entry, sessionIDs))]
+      if (item && typeof item === "object") return [key, rewriteReferenceValue(item, sessionIDs)]
+      return [key, item]
+    }),
+  )
+}
+
+function rewriteReferenceValue(value: unknown, sessionIDs: Map<string, string>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => rewriteReferenceValue(entry, sessionIDs))
+  if (!value || typeof value !== "object") return value
+  return rewriteSessionReferences(value as Record<string, any>, sessionIDs)
 }
 
 export async function migrateSession(input: {
@@ -214,98 +245,134 @@ export async function migrateSession(input: {
   sourceDirectory: string
   destinationDirectory: string
   destinationProjectID?: string
+  newSessionID?: () => string
   importSession?: ImportRunner
   progress?: MigrationProgress
 }): Promise<MigrationResult> {
   const { api, sessionID, sourceDirectory, destinationDirectory, progress } = input
   const client = api.client as any as Client & Record<string, any>
-  let stage = "reading the source session"
-  let destinationSessionID: string | undefined
+  let stage = "discovering the source session tree"
+  const destinationNodes: PreparedNode[] = []
   try {
-    const source = await getSession(client, sessionID, sourceDirectory)
-    stage = "checking child sessions"
-    await ensureNoChildren(client, sessionID, sourceDirectory)
+    const sourceTree = await discoverSessionTree(client, sessionID, sourceDirectory)
+    const sourceNodes = flattenNodes(sourceTree)
     stage = "checking source state"
-    await ensureIdle(client, sessionID, sourceDirectory)
+    for (const node of sourceNodes) await ensureIdle(client, node.info.id, sourceDirectory)
+
     stage = "reading the source history"
-    const messages = await getMessages(client, sessionID, sourceDirectory)
+    for (const node of sourceNodes) node.messages = await getMessages(client, node.info.id, sourceDirectory)
+
     stage = "resolving destination settings"
-    const settings = await destinationSettings(client, source, destinationDirectory)
+    for (const node of sourceNodes) node.settings = await destinationSettings(client, node.info, destinationDirectory)
     const destinationProjectID = input.destinationProjectID ?? (await getProjectID(client, destinationDirectory))
 
-    stage = "creating the destination session"
-    progress?.("Creating destination session")
-    destinationSessionID = await createSessionID(client, destinationDirectory, settings)
-    await deleteAndVerifySession(client, destinationSessionID, destinationDirectory)
-    const payload = prepareImportPayload(source, messages, destinationSessionID, settings)
+    stage = "creating the destination sessions"
+    progress?.(`Creating ${sourceNodes.length} destination session${sourceNodes.length === 1 ? "" : "s"}`)
+    const destinationIDs = new Map<string, string>()
+    for (const node of sourceNodes) {
+      const destinationID = (input.newSessionID ?? createDestinationSessionID)()
+      destinationIDs.set(node.info.id, destinationID)
+      const destinationNode: PreparedNode = {
+        source: node,
+        destinationID,
+        destinationParentID: node === sourceTree ? undefined : destinationIDs.get(node.info.parentID ?? ""),
+        settings: node.settings!,
+      }
+      destinationNodes.push(destinationNode)
+      await createSessionID(client, destinationDirectory, destinationNode.settings, destinationID)
+      await deleteAndVerifySession(client, destinationID, destinationDirectory)
+    }
 
-    stage = "preparing the export"
-    progress?.("Preparing session export")
-    await withExportFile(payload, async (filePath) => {
-      stage = "importing session history"
-      progress?.("Importing session history")
-      await (input.importSession ?? runImport)({ directory: destinationDirectory, filePath })
-    })
+    for (const node of destinationNodes) {
+      if (node.source !== sourceTree && !node.destinationParentID) {
+        throw new Error(`Could not map the parent session for ${node.source.info.id}`)
+      }
+      node.payload = prepareImportPayload(
+        node.source.info,
+        node.source.messages,
+        node.destinationID,
+        node.settings,
+        node.destinationParentID,
+        destinationIDs,
+      )
+    }
 
-    stage = "verifying the imported session"
-    progress?.("Verifying imported session")
-    const imported = await getSession(client, destinationSessionID, destinationDirectory)
-    const importedMessages = await getMessages(client, destinationSessionID, destinationDirectory)
-    verifyImportedSession(
-      imported,
-      importedMessages,
-      payload.messages,
-      source,
-      destinationSessionID,
-      destinationDirectory,
-      destinationProjectID,
-      settings,
-    )
+    stage = "importing session history"
+    for (const [index, node] of destinationNodes.entries()) {
+      progress?.(`Importing session history (${index + 1}/${destinationNodes.length})`)
+      await withExportFile(node.payload!, async (filePath) => {
+        await (input.importSession ?? runImport)({ directory: destinationDirectory, filePath })
+      })
+    }
+
+    stage = "verifying the imported sessions"
+    for (const [index, node] of destinationNodes.entries()) {
+      progress?.(`Verifying imported session (${index + 1}/${destinationNodes.length})`)
+      const imported = await getSession(client, node.destinationID, destinationDirectory)
+      const importedMessages = await getMessages(client, node.destinationID, destinationDirectory)
+      verifyImportedSession(
+        imported,
+        importedMessages,
+        node.payload!.messages,
+        node.source.info,
+        node.payload!.info,
+        node.destinationID,
+        node.destinationParentID,
+        destinationDirectory,
+        destinationProjectID,
+        node.settings,
+      )
+      node.importedMessages = importedMessages
+    }
 
     stage = "checking session continuation"
-    progress?.("Checking continuation")
-    const reminder = await addDirectoryReminder(client, destinationSessionID, destinationDirectory, settings)
-    const continuedMessages = await getMessages(client, destinationSessionID, destinationDirectory)
-    verifyReminder(continuedMessages, reminder, importedMessages)
-    const continued = await getSession(client, destinationSessionID, destinationDirectory)
-    verifyImportedSession(
-      continued,
-      importedMessages,
-      payload.messages,
-      source,
-      destinationSessionID,
-      destinationDirectory,
-      destinationProjectID,
-      settings,
-    )
+    for (const [index, node] of destinationNodes.entries()) {
+      progress?.(`Checking continuation (${index + 1}/${destinationNodes.length})`)
+      const reminder = await addDirectoryReminder(client, node.destinationID, destinationDirectory, node.settings)
+      const continuedMessages = await getMessages(client, node.destinationID, destinationDirectory)
+      verifyReminder(continuedMessages, reminder, node.importedMessages!)
+      const continued = await getSession(client, node.destinationID, destinationDirectory)
+      verifyImportedSession(
+        continued,
+        node.importedMessages!,
+        node.payload!.messages,
+        node.source.info,
+        node.payload!.info,
+        node.destinationID,
+        node.destinationParentID,
+        destinationDirectory,
+        destinationProjectID,
+        node.settings,
+      )
+    }
 
-    stage = "removing the source session"
-    progress?.("Removing source session")
-    await ensureSourceStillSafe(client, sessionID, sourceDirectory, source, messages)
+    stage = "removing the source sessions"
+    progress?.("Removing source sessions")
+    await ensureSourceStillSafe(client, sourceNodes, sourceDirectory)
+    const warnings = destinationNodes.flatMap((node) => node.settings.warnings)
     let sourceDeleted = true
-    const warnings = [...settings.warnings]
+    const sourceRoot = sourceNodes[0]!
     try {
-      await deleteSession(client, sessionID, sourceDirectory)
-      const deletionState = await sessionDeletionState(client, sessionID, sourceDirectory)
-      if (deletionState !== "gone") {
+      await deleteSession(client, sourceRoot.info.id, sourceDirectory)
+      const deletionStates = await Promise.all(
+        sourceNodes.map(async (node) => ({ node, state: await sessionDeletionState(client, node.info.id, sourceDirectory) })),
+      )
+      const remaining = deletionStates.filter((item) => item.state !== "gone")
+      if (remaining.length > 0) {
         sourceDeleted = false
-        warnings.push(
-          deletionState === "present"
-            ? "The source session could not be removed; both sessions remain after an unconfirmed deletion."
-            : "The source session deletion could not be verified; both sessions remain.",
-        )
+        warnings.push("The source session tree could not be fully removed; both session trees remain after an unconfirmed deletion.")
       }
     } catch (error) {
       sourceDeleted = false
-      warnings.push(`The source session could not be removed; both sessions remain: ${errorMessage(error)}`)
+      warnings.push(`The source session tree could not be removed; both session trees remain: ${errorMessage(error)}`)
     }
 
-    return { sessionID: destinationSessionID, sourceDeleted, warnings }
+    return { sessionID: destinationNodes[0]!.destinationID, sourceDeleted, warnings }
   } catch (error) {
-    if (destinationSessionID) {
+    if (destinationNodes.length > 0) {
       progress?.("Cleaning up partial destination")
       try {
-        await deleteAndVerifySession(client, destinationSessionID, destinationDirectory)
+        await cleanupDestinationSessions(client, destinationNodes, destinationDirectory)
       } catch (cleanupError) {
         throw new Error(
           `Session migration failed while ${stage}: ${errorMessage(error)}. Could not remove the partial destination session: ${errorMessage(cleanupError)}`,
@@ -314,6 +381,23 @@ export async function migrateSession(input: {
     }
     throw new Error(`Session migration failed while ${stage}: ${errorMessage(error)}`)
   }
+}
+
+type SessionNode = {
+  info: SessionInfo
+  messages: SessionMessage[]
+  children: SessionNode[]
+  depth: number
+  settings?: DestinationSettings
+}
+
+type PreparedNode = {
+  source: SessionNode
+  destinationID: string
+  destinationParentID?: string
+  settings: DestinationSettings
+  payload?: ImportPayload
+  importedMessages?: SessionMessage[]
 }
 
 async function getSession(client: Client & Record<string, any>, sessionID: string, directory: string) {
@@ -330,40 +414,72 @@ async function getMessages(client: Client & Record<string, any>, sessionID: stri
   return messages as SessionMessage[]
 }
 
-async function ensureNoChildren(client: Client & Record<string, any>, sessionID: string, directory: string) {
+async function getChildren(client: Client & Record<string, any>, sessionID: string, directory: string) {
   const children = client.session?.children
   if (typeof children !== "function") throw new Error("OpenCode cannot verify child sessions before migration")
   const result = await children.call(client.session, { sessionID, directory }, { throwOnError: true })
   if (!Array.isArray(result?.data)) throw new Error("OpenCode returned an invalid child-session list")
-  if (result.data.length > 0) {
-    throw new Error("This session has child sessions; move the child sessions first to avoid deleting them")
+  return result.data as SessionInfo[]
+}
+
+async function discoverSessionTree(client: Client & Record<string, any>, sessionID: string, directory: string) {
+  const visited = new Set<string>()
+  const visit = async (id: string, depth: number, expectedParentID?: string, projectID?: string): Promise<SessionNode> => {
+    if (visited.has(id)) throw new Error(`Session tree contains a cycle at ${id}`)
+    visited.add(id)
+    const info = await getSession(client, id, directory)
+    if (expectedParentID && info.parentID !== expectedParentID) {
+      throw new Error(`Child session ${id} does not refer to its reported parent`)
+    }
+    if (projectID && info.projectID !== projectID) {
+      throw new Error(`Child session ${id} belongs to another project`)
+    }
+    const rootProjectID = projectID ?? info.projectID
+    const node: SessionNode = { info, messages: [], children: [], depth }
+    for (const child of await getChildren(client, id, directory)) {
+      if (!child.id) throw new Error(`OpenCode returned a child session without an ID for ${id}`)
+      node.children.push(await visit(child.id, depth + 1, id, rootProjectID))
+    }
+    return node
   }
+  return visit(sessionID, 0)
+}
+
+function flattenNodes(root: SessionNode) {
+  const result: SessionNode[] = [root]
+  for (const child of root.children) result.push(...flattenNodes(child))
+  return result
 }
 
 async function ensureSourceStillSafe(
   client: Client & Record<string, any>,
-  sessionID: string,
+  sourceNodes: SessionNode[],
   directory: string,
-  source: SessionInfo,
-  sourceMessages: SessionMessage[],
 ) {
-  await ensureIdle(client, sessionID, directory)
-  await ensureNoChildren(client, sessionID, directory)
-  const current = await getSession(client, sessionID, directory)
-  const currentMessages = await getMessages(client, sessionID, directory)
-  if (
-    current.title !== source.title ||
-    stableStringify(current.metadata) !== stableStringify(source.metadata) ||
-    current.agent !== source.agent ||
-    current.projectID !== source.projectID ||
-    current.directory !== source.directory ||
-    current.parentID !== source.parentID ||
-    stableStringify(current.permission) !== stableStringify(source.permission) ||
-    stableStringify(current.model) !== stableStringify(source.model)
-  ) {
-    throw new Error("The source session changed during migration")
+  for (const node of sourceNodes) {
+    await ensureIdle(client, node.info.id, directory)
+    const current = await getSession(client, node.info.id, directory)
+    if (
+      current.title !== node.info.title ||
+      stableStringify(current.metadata) !== stableStringify(node.info.metadata) ||
+      current.agent !== node.info.agent ||
+      current.projectID !== node.info.projectID ||
+      current.directory !== node.info.directory ||
+      current.parentID !== node.info.parentID ||
+      stableStringify(current.permission) !== stableStringify(node.info.permission) ||
+      stableStringify(current.model) !== stableStringify(node.info.model)
+    ) {
+      throw new Error(`The source session ${node.info.id} changed during migration`)
+    }
+    const currentChildren = await getChildren(client, node.info.id, directory)
+    const expectedChildren = node.children.map((child) => child.info.id)
+    const actualChildren = currentChildren.map((child) => child.id)
+    if (stableStringify(actualChildren) !== stableStringify(expectedChildren)) {
+      throw new Error(`The child sessions of ${node.info.id} changed during migration`)
+    }
+    const currentMessages = await getMessages(client, node.info.id, directory)
+    if (!sameMessageShape(node.messages, currentMessages)) throw new Error(`The history of ${node.info.id} changed during migration`)
   }
-  if (!sameMessageShape(sourceMessages, currentMessages)) throw new Error("The source history changed during migration")
 }
 
 async function ensureIdle(client: Client & Record<string, any>, sessionID: string, directory: string) {
@@ -429,12 +545,18 @@ async function destinationSettings(client: Client & Record<string, any>, source:
   return { model, agent, warnings }
 }
 
-async function createSessionID(client: Client & Record<string, any>, directory: string, settings: DestinationSettings) {
+async function createSessionID(
+  client: Client & Record<string, any>,
+  directory: string,
+  settings: DestinationSettings,
+  requestedID: string,
+) {
   const create = client.v2?.session?.create
   if (typeof create !== "function") throw new Error("OpenCode 1.18+ is required for cross-project migration")
   const result = await create.call(
     client.v2.session,
     {
+      id: requestedID,
       agent: settings.agent,
       model: settings.model,
       location: { directory },
@@ -442,16 +564,18 @@ async function createSessionID(client: Client & Record<string, any>, directory: 
     { throwOnError: true },
   )
   const id = result?.data?.data?.id
-  if (!id) throw new Error("OpenCode did not return a destination session ID")
+  if (!id || id !== requestedID) throw new Error("OpenCode did not create the requested destination session ID")
   return id
 }
 
 function verifyImportedSession(
   imported: SessionInfo,
-  importedMessages: SessionMessage[],
-  sourceMessages: SessionMessage[],
-  source: SessionInfo,
+      importedMessages: SessionMessage[],
+      sourceMessages: SessionMessage[],
+      source: SessionInfo,
+  expectedInfo: ImportPayload["info"],
   destinationSessionID: string,
+  destinationParentID: string | undefined,
   directory: string,
   projectID: string | undefined,
   settings: DestinationSettings,
@@ -460,8 +584,8 @@ function verifyImportedSession(
   if (imported.directory !== directory) throw new Error("Imported session directory does not match the destination")
   if (projectID && imported.projectID !== projectID) throw new Error("Imported session project does not match the destination")
   if (imported.title !== source.title) throw new Error("Imported session title does not match the source")
-  if (stableStringify(imported.metadata) !== stableStringify(source.metadata)) throw new Error("Imported session metadata does not match the source")
-  if (imported.parentID !== undefined) throw new Error("Imported session still refers to a source parent session")
+  if (stableStringify(imported.metadata) !== stableStringify(expectedInfo.metadata)) throw new Error("Imported session metadata does not match the source")
+  if (imported.parentID !== destinationParentID) throw new Error("Imported session parent does not match the destination tree")
   if (imported.permission !== undefined) throw new Error("Source session permission rules leaked into the destination")
   if (!sameImportedMessageShape(sourceMessages, importedMessages)) throw new Error("Imported session history does not match the source")
   if (settings.agent && imported.agent !== settings.agent) throw new Error("Imported session agent does not match the selected agent")
@@ -533,6 +657,18 @@ async function deleteAndVerifySession(client: Client & Record<string, any>, sess
   if (state !== "gone") throw new Error(`Destination session deletion is ${state}`)
 }
 
+async function cleanupDestinationSessions(client: Client & Record<string, any>, nodes: PreparedNode[], directory: string) {
+  const failures: string[] = []
+  for (const node of [...nodes].sort((left, right) => right.source.depth - left.source.depth)) {
+    try {
+      await deleteAndVerifySession(client, node.destinationID, directory)
+    } catch (error) {
+      failures.push(`${node.destinationID}: ${errorMessage(error)}`)
+    }
+  }
+  if (failures.length > 0) throw new Error(failures.join("; "))
+}
+
 async function sessionDeletionState(client: Client & Record<string, any>, sessionID: string, directory: string) {
   try {
     const result = await client.session.get({ sessionID, directory }, { throwOnError: true })
@@ -581,6 +717,10 @@ function errorMessage(error: unknown) {
 
 function createID(prefix: string, originalID: string, namespace: string) {
   return `${prefix}_${namespace}_${originalID}`
+}
+
+function createDestinationSessionID() {
+  return `ses_${randomUUID().replaceAll("-", "")}`
 }
 
 function comparableInfo(info: Record<string, any>) {

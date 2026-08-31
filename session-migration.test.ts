@@ -27,13 +27,21 @@ function migrationApi(options: {
   models?: unknown[]
   agents?: unknown[]
   children?: unknown[]
+  childrenBySession?: Record<string, unknown[]>
+  sourceSessions?: Record<string, Record<string, unknown>>
+  sourceMessagesBySession?: Record<string, unknown[]>
+  destinationIDs?: string[]
   status?: { type: string }
   destinationProjectID?: string
 }) {
   const deleted: string[] = []
   const deletedSet = new Set<string>()
-  let imported = false
-  let destinationMessages: unknown[] = []
+  const sourceSessions = { "ses-source": sourceInfo, ...(options.sourceSessions ?? {}) }
+  const sourceMessagesBySession = { "ses-source": sourceMessages, ...(options.sourceMessagesBySession ?? {}) }
+  const destinationIDs = options.destinationIDs ?? ["ses-destination"]
+  const destinationMessages: Record<string, unknown[]> = {}
+  const destinationInfos: Record<string, Record<string, unknown>> = {}
+  let createIndex = 0
   const destinationInfo = {
     ...sourceInfo,
     id: "ses-destination",
@@ -47,34 +55,48 @@ function migrationApi(options: {
 
   const client = {
     session: {
-      async children() {
-        return { data: options.children ?? [] }
+      async children(input: { sessionID: string }) {
+        return { data: options.childrenBySession?.[input.sessionID] ?? options.children ?? [] }
       },
       async status() {
-        return { data: { "ses-source": options.status ?? { type: "idle" } } }
+        return {
+          data: Object.fromEntries(Object.keys(sourceSessions).map((id) => [id, options.status ?? { type: "idle" }])),
+        }
       },
-      async get(input: { sessionID: string }) {
-        if (deletedSet.has(input.sessionID) && !(input.sessionID === "ses-destination" && imported)) throw new Error("not found")
-        return { data: input.sessionID === "ses-source" || !imported ? sourceInfo : destinationInfo }
+      async get(input: { sessionID: string; directory: string }) {
+        if (input.directory === "/projects/a") {
+          if (deletedSet.has(input.sessionID)) throw new Error("not found")
+          const info = sourceSessions[input.sessionID]
+          if (!info) throw new Error("not found")
+          return { data: info }
+        }
+        if (deletedSet.has(input.sessionID) && !destinationInfos[input.sessionID]) throw new Error("not found")
+        return { data: destinationInfos[input.sessionID] ?? destinationInfo }
       },
-      async messages(input: { sessionID: string }) {
-        return { data: input.sessionID === "ses-source" || !imported ? sourceMessages : destinationMessages }
+      async messages(input: { sessionID: string; directory: string }) {
+        if (input.directory === "/projects/a") return { data: sourceMessagesBySession[input.sessionID] ?? [] }
+        return { data: destinationMessages[input.sessionID] ?? [] }
       },
       async delete(input: { sessionID: string }) {
         deleted.push(input.sessionID)
         if (options.failSourceDelete && input.sessionID === "ses-source") throw new Error("source delete failed")
         deletedSet.add(input.sessionID)
+        delete destinationInfos[input.sessionID]
+        delete destinationMessages[input.sessionID]
+        if (input.sessionID === "ses-source") {
+          for (const id of Object.keys(sourceSessions)) deletedSet.add(id)
+        }
         return { data: true }
       },
-      async prompt(input: { parts: Array<{ text: string; type: string; synthetic?: boolean }> }) {
+      async prompt(input: { sessionID: string; parts: Array<{ text: string; type: string; synthetic?: boolean }> }) {
         const parts = input.parts.map((part) => ({
           ...part,
           id: "part-reminder",
           sessionID: "ses-destination",
           messageID: "msg-reminder",
         }))
-        destinationMessages = [
-          ...destinationMessages,
+        destinationMessages[input.sessionID] = [
+          ...(destinationMessages[input.sessionID] ?? []),
           {
             info: { id: "msg-reminder", sessionID: "ses-destination", role: "user" },
             parts,
@@ -106,8 +128,8 @@ function migrationApi(options: {
         },
       },
       session: {
-        async create() {
-          return { data: { data: { id: "ses-destination" } } }
+        async create(input: { id: string }) {
+          return { data: { data: { id: input.id } } }
         },
       },
     },
@@ -116,12 +138,21 @@ function migrationApi(options: {
   return {
     api: { client } as any,
     deleted,
-    markImported(messages: unknown[] = sourceMessages, info?: Record<string, unknown>) {
-      imported = true
-      destinationMessages = messages
-      if (info?.model) destinationInfo.model = info.model
-      if (info?.agent) destinationInfo.agent = info.agent as string
-      if (options.destinationProjectID) destinationInfo.projectID = options.destinationProjectID
+    nextDestinationID() {
+      return destinationIDs[createIndex++] ?? `ses-destination-${createIndex}`
+    },
+    markImported(messages: unknown[] = sourceMessages, info?: Record<string, unknown>, id = "ses-destination") {
+      destinationMessages[id] = messages
+      destinationInfos[id] = {
+        ...destinationInfo,
+        id,
+        title: (info?.title as string | undefined) ?? destinationInfo.title,
+        metadata: info?.metadata ?? destinationInfo.metadata,
+        model: info?.model ?? destinationInfo.model,
+        agent: info?.agent ?? destinationInfo.agent,
+        parentID: info?.parentID,
+        projectID: options.destinationProjectID ?? destinationInfo.projectID,
+      }
     },
   }
 }
@@ -217,6 +248,7 @@ describe("session migration", () => {
 
     const result = await migrateSession({
       api: state.api,
+      newSessionID: state.nextDestinationID,
       sessionID: "ses-source",
       sourceDirectory: "/projects/a",
       destinationDirectory: "/projects/b",
@@ -240,6 +272,7 @@ describe("session migration", () => {
     await expect(
       migrateSession({
         api: state.api,
+        newSessionID: state.nextDestinationID,
         sessionID: "ses-source",
         sourceDirectory: "/projects/a",
         destinationDirectory: "/projects/b",
@@ -256,6 +289,7 @@ describe("session migration", () => {
     const state = migrationApi({ failSourceDelete: true })
     const result = await migrateSession({
       api: state.api,
+      newSessionID: state.nextDestinationID,
       sessionID: "ses-source",
       sourceDirectory: "/projects/a",
       destinationDirectory: "/projects/b",
@@ -266,28 +300,54 @@ describe("session migration", () => {
     })
 
     expect(result.sourceDeleted).toBe(false)
-    expect(result.warnings[0]).toContain("source session could not be removed")
+    expect(result.warnings[0]).toContain("could not be removed")
   })
 
-  it("rejects a parent session before creating a destination", async () => {
-    const state = migrationApi({ children: [{ id: "child" }] })
-    await expect(
-      migrateSession({
-        api: state.api,
-        sessionID: "ses-source",
-        sourceDirectory: "/projects/a",
-        destinationDirectory: "/projects/b",
-        importSession: async () => undefined,
-      }),
-    ).rejects.toThrow("move the child sessions first")
-    expect(state.deleted).toEqual([])
+  it("moves child sessions and rebuilds their destination parent links", async () => {
+    const childInfo = {
+      ...sourceInfo,
+      id: "ses-child",
+      title: "Child migration test",
+      parentID: "ses-source",
+      metadata: { ticket: "child", jobId: "ses-child", parentSessionId: "ses-source" },
+    }
+    const childMessages = [
+      {
+        info: { id: "msg-child", sessionID: "ses-child", role: "user" },
+        parts: [{ id: "part-child", sessionID: "ses-child", messageID: "msg-child", type: "text", text: "Child" }],
+      },
+    ]
+    const state = migrationApi({
+      sourceSessions: { "ses-child": childInfo },
+      sourceMessagesBySession: { "ses-child": childMessages },
+      childrenBySession: { "ses-source": [{ id: "ses-child" }], "ses-child": [] },
+      destinationIDs: ["ses-destination", "ses-child-destination"],
+      destinationProjectID: "project-b",
+    })
+
+    const result = await migrateSession({
+      api: state.api,
+      newSessionID: state.nextDestinationID,
+      sessionID: "ses-source",
+      sourceDirectory: "/projects/a",
+      destinationDirectory: "/projects/b",
+      destinationProjectID: "project-b",
+      importSession: async (input) => {
+        const payload = await Bun.file(input.filePath).json()
+        state.markImported(payload.messages, payload.info, payload.info.id)
+      },
+    })
+
+    expect(result).toEqual({ sessionID: "ses-destination", sourceDeleted: true, warnings: [] })
+    expect(state.deleted).toEqual(["ses-destination", "ses-child-destination", "ses-source"])
   })
 
   it("rejects a busy source before creating a destination", async () => {
     const state = migrationApi({ status: { type: "busy" } })
     await expect(
       migrateSession({
-        api: state.api,
+      api: state.api,
+        newSessionID: state.nextDestinationID,
         sessionID: "ses-source",
         sourceDirectory: "/projects/a",
         destinationDirectory: "/projects/b",
@@ -305,6 +365,7 @@ describe("session migration", () => {
     })
     const result = await migrateSession({
       api: state.api,
+      newSessionID: state.nextDestinationID,
       sessionID: "ses-source",
       sourceDirectory: "/projects/a",
       destinationDirectory: "/projects/b",

@@ -134,6 +134,12 @@ async function projectInfo(api: TuiPluginApi, directory: string) {
   return info
 }
 
+async function hasChildSessions(api: TuiPluginApi, sessionID: string, directory: string) {
+  const result = await (api.client as any).session.children({ sessionID, directory }, { throwOnError: true })
+  if (!Array.isArray(result?.data)) throw new Error("Could not inspect child sessions")
+  return result.data.length > 0
+}
+
 function openPathPrompt(api: TuiPluginApi) {
   const sessionID = currentSessionID(api)
   if (!sessionID) {
@@ -209,8 +215,9 @@ async function performMove(api: TuiPluginApi, sessionID: string, sourceDirectory
     await ensureIdle(api, sessionID, sourceDirectory)
     const source = await sessionInfo(api, sessionID, sourceDirectory)
     const destination = await projectInfo(api, destinationDirectory)
+    const hasChildren = await hasChildSessions(api, sessionID, sourceDirectory)
 
-    if (shouldUseNativeMove(source.projectID, destination.id)) {
+    if (shouldUseNativeMove(source.projectID, destination.id) && !hasChildren) {
       await moveSession(api, sessionID, destinationDirectory, false)
       api.ui.toast({ variant: "success", message: `Session directory changed to ${destinationDirectory}` })
       return

@@ -14,7 +14,7 @@ Moving between projects preserves the conversation in a replacement session.
 - The model receives a synthetic reminder about the new directory.
 - Cross-project moves use a verified export/import flow and then remove the
   source session.
-- Sessions with child sessions are rejected to avoid recursively deleting them.
+- Cross-project moves include child sessions and rebuild their parent links.
 
 ## Setup
 
